@@ -6836,7 +6836,41 @@ class AIAgent:
                                 sum(len(p) for p in self._codex_streamed_text_parts),
                                 self._client_log_context(),
                             )
-                    final_response = stream.get_final_response()
+                    try:
+                        final_response = stream.get_final_response()
+                    except Exception as _final_exc:
+                        # The chatgpt.com Codex backend can stream valid items but
+                        # send a terminal event (response.incomplete) whose output
+                        # is null; the OpenAI SDK then raises *inside*
+                        # get_final_response() (e.g. "'NoneType' object is not
+                        # iterable") while assembling .output — so the normalization
+                        # below never runs. Reconstruct the reply from what we
+                        # already collected off the stream instead of failing the
+                        # turn. Re-raise only when nothing usable was streamed, so
+                        # the caller's fallback chain still engages cleanly.
+                        if collected_output_items:
+                            _synth_output = list(collected_output_items)
+                        elif self._codex_streamed_text_parts and not has_tool_calls:
+                            _synth_output = [SimpleNamespace(
+                                type="message",
+                                role="assistant",
+                                status="completed",
+                                content=[SimpleNamespace(
+                                    type="output_text",
+                                    text="".join(self._codex_streamed_text_parts),
+                                )],
+                            )]
+                        else:
+                            raise
+                        logger.warning(
+                            "Codex get_final_response() raised %s; synthesized "
+                            "response from %d collected items / %d text parts. %s",
+                            type(_final_exc).__name__,
+                            len(collected_output_items),
+                            len(self._codex_streamed_text_parts),
+                            self._client_log_context(),
+                        )
+                        return SimpleNamespace(output=_synth_output, status="completed")
                     # PATCH: ChatGPT Codex backend streams valid output items
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
