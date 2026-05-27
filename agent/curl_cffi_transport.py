@@ -31,10 +31,13 @@ hard failure.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Iterator, List, Optional, Tuple
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Request headers libcurl/curl_cffi sets itself (or that describe a transfer
 # framing it manages). Forwarding them causes Host mismatches, wrong
@@ -150,6 +153,21 @@ class CurlCffiTransport(httpx.BaseTransport):
         except Exception:
             session.close()
             raise
+
+        # [codex-diag] Log what the endpoint actually returned so we can tell a
+        # real Codex SSE stream (content-type text/event-stream) apart from a
+        # Cloudflare challenge (text/html + cf-mitigated) or an API error (json).
+        try:
+            _h = curl_resp.headers
+            logger.warning(
+                "[codex-diag] curl_cffi %s %s -> status=%s content-type=%s "
+                "cf-mitigated=%s cf-ray=%s server=%s impersonate=%s",
+                request.method, str(request.url), curl_resp.status_code,
+                _h.get("content-type"), _h.get("cf-mitigated"),
+                _h.get("cf-ray"), _h.get("server"), self._impersonate,
+            )
+        except Exception:
+            pass
 
         resp_headers: List[Tuple[str, str]] = [
             (key, value)

@@ -6939,6 +6939,16 @@ class AIAgent:
                     )
                     return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
                 raise
+            except Exception as exc:
+                # [codex-diag] Surface the full traceback for the TypeError /
+                # 'NoneType' failures — the summary logger only prints the
+                # message, which hid where the codex path actually breaks.
+                import traceback as _tb
+                logger.warning(
+                    "[codex-diag] _run_codex_stream raised %s: %s\n%s",
+                    type(exc).__name__, exc, _tb.format_exc(),
+                )
+                raise
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
         """Fallback path for stream completion edge cases on Codex-style Responses backends."""
