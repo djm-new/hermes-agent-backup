@@ -34,6 +34,12 @@ RUN touch README.md && \
 COPY . .
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
+# Cloudflare-resistant TLS for the ChatGPT Codex backend
+# (agent/curl_cffi_transport.py). Installed into the same .venv AFTER the frozen
+# `uv sync` so it never touches uv.lock — curl_cffi ships manylinux wheels with a
+# bundled libcurl-impersonate, so no build toolchain or lockfile change is needed.
+RUN uv pip install --no-cache-dir "curl_cffi>=0.7,<1"
+
 RUN mkdir -p /opt/data && chmod -R a+rX /opt/hermes
 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]

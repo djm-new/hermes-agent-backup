@@ -6390,6 +6390,33 @@ class AIAgent:
             import httpx as _httpx
             import socket as _socket
 
+            # When a custom transport is provided, httpx won't auto-read proxy
+            # from env vars (allow_env_proxies = trust_env and transport is None).
+            # Explicitly read proxy settings while still honoring NO_PROXY for
+            # loopback / local endpoints such as a locally hosted sub2api.
+            _proxy = _get_proxy_for_base_url(base_url)
+
+            # The ChatGPT Codex backend sits behind Cloudflare bot-management.
+            # From a flagged datacenter IP, plain httpx's TLS fingerprint draws a
+            # cf-mitigated challenge (HTML) that breaks the Codex stream parser —
+            # even though Hermes already pins the codex_cli_rs originator headers
+            # (see _codex_cloudflare_headers). Route Codex — and ONLY Codex —
+            # through curl_cffi's Chrome TLS so the handshake looks like a
+            # browser, while the originator/auth headers are forwarded unchanged.
+            # Returns a real httpx.Client (the sync OpenAI client requires that;
+            # an httpx.AsyncClient here raises "Invalid http_client argument").
+            # Falls through to the stock keepalive client when curl_cffi is
+            # unavailable. See agent/curl_cffi_transport.py.
+            if base_url and base_url_host_matches(base_url, "chatgpt.com"):
+                try:
+                    from agent.curl_cffi_transport import build_codex_curl_client
+
+                    _codex_client = build_codex_curl_client(base_url=base_url, proxy=_proxy)
+                    if _codex_client is not None:
+                        return _codex_client
+                except Exception:
+                    pass  # fall through to the stock keepalive client
+
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
             if hasattr(_socket, "TCP_KEEPIDLE"):
                 _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
@@ -6397,11 +6424,6 @@ class AIAgent:
                 _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
             elif hasattr(_socket, "TCP_KEEPALIVE"):
                 _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
-            # When a custom transport is provided, httpx won't auto-read proxy
-            # from env vars (allow_env_proxies = trust_env and transport is None).
-            # Explicitly read proxy settings while still honoring NO_PROXY for
-            # loopback / local endpoints such as a locally hosted sub2api.
-            _proxy = _get_proxy_for_base_url(base_url)
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
                 proxy=_proxy,
@@ -6819,6 +6841,16 @@ class AIAgent:
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
                     _out = getattr(final_response, "output", None)
+                    if _out is None:
+                        # The chatgpt.com Codex backend can finalize a response
+                        # whose ``output`` is None (not just an empty list).
+                        # Normalize to [] so the backfill below runs and nothing
+                        # downstream iterates None ('NoneType' is not iterable).
+                        try:
+                            final_response.output = []
+                        except Exception:
+                            pass
+                        _out = []
                     if isinstance(_out, list) and not _out:
                         if collected_output_items:
                             final_response.output = list(collected_output_items)
@@ -6921,6 +6953,15 @@ class AIAgent:
                 if terminal_response is not None:
                     # Backfill empty output from collected stream events
                     _out = getattr(terminal_response, "output", None)
+                    if _out is None:
+                        # See _run_codex_stream: the Codex backend can emit a
+                        # terminal response with output=None. Normalize to [] so
+                        # the backfill runs and downstream iteration is safe.
+                        try:
+                            terminal_response.output = []
+                        except Exception:
+                            pass
+                        _out = []
                     if isinstance(_out, list) and not _out:
                         if collected_output_items:
                             terminal_response.output = list(collected_output_items)
