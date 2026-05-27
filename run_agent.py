@@ -6940,15 +6940,47 @@ class AIAgent:
                     return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
                 raise
             except Exception as exc:
-                # [codex-diag] Surface the full traceback for the TypeError /
-                # 'NoneType' failures — the summary logger only prints the
-                # message, which hid where the codex path actually breaks.
-                import traceback as _tb
+                # The OpenAI SDK's responses.stream() accumulator calls
+                # parse_response() on every event, and parse_response does
+                # `for output in response.output:` — the chatgpt.com Codex backend
+                # sends a terminal event whose response.output is null, so the SDK
+                # raises "'NoneType' object is not iterable" mid-iteration, before
+                # get_final_response() is ever reached. We have already collected
+                # the streamed items/text from the events that preceded the
+                # terminal one, so reconstruct the reply from those instead of
+                # failing the turn over to another provider.
+                if collected_output_items:
+                    _synth = list(collected_output_items)
+                elif self._codex_streamed_text_parts and not has_tool_calls:
+                    _synth = [SimpleNamespace(
+                        type="message",
+                        role="assistant",
+                        status="completed",
+                        content=[SimpleNamespace(
+                            type="output_text",
+                            text="".join(self._codex_streamed_text_parts),
+                        )],
+                    )]
+                else:
+                    _synth = None
+                if _synth:
+                    logger.warning(
+                        "Codex responses.stream() accumulator failed (%s: %s); "
+                        "reconstructed reply from %d items / %d text parts. %s",
+                        type(exc).__name__, exc, len(collected_output_items),
+                        len(self._codex_streamed_text_parts),
+                        self._client_log_context(),
+                    )
+                    return SimpleNamespace(output=_synth, status="completed")
+                # Nothing was streamed before the failure — re-issue through the
+                # raw create(stream=True) path, which yields events without the
+                # buggy accumulator.
                 logger.warning(
-                    "[codex-diag] _run_codex_stream raised %s: %s\n%s",
-                    type(exc).__name__, exc, _tb.format_exc(),
+                    "Codex responses.stream() failed before any content (%s: %s); "
+                    "retrying via create(stream=True). %s",
+                    type(exc).__name__, exc, self._client_log_context(),
                 )
-                raise
+                return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
         """Fallback path for stream completion edge cases on Codex-style Responses backends."""
