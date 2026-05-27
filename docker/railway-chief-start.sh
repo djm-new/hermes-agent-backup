@@ -5,6 +5,14 @@
 # script runs. This wrapper optionally bootstraps Chief's profile files from
 # Railway environment variables, then runs the gateway in the foreground so
 # Railway can supervise/restart it.
+
+# Re-exec under bash when started by a POSIX sh. Railway's start command can run
+# this script through /bin/sh (dash), which lacks `set -o pipefail` and the
+# ${!indirect} expansion used in write_b64_file below — that crash-loops the
+# gateway at the line just below. Guarantee bash regardless of how we're invoked.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 set -euo pipefail
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"

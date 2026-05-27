@@ -8,7 +8,7 @@ ENV PATH="/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}"
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential curl python3 ripgrep ffmpeg gcc python3-dev \
-      libffi-dev procps git openssh-client tini ca-certificates && \
+      libffi-dev procps git openssh-client tini ca-certificates bash && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
