@@ -32,6 +32,11 @@ RUN touch README.md && \
       --extra web
 
 COPY . .
+# Normalize shell scripts to LF. Uploads from a Windows/autocrlf checkout can
+# carry CRLF, which makes bash choke on the stray carriage return
+# ("$'\r': command not found", "syntax error near $'{\r'") and crash-loops the
+# gateway start script. Strip trailing CR so the image's scripts are always LF.
+RUN sed -i 's/\r$//' docker/*.sh
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # Cloudflare-resistant TLS for the ChatGPT Codex backend
