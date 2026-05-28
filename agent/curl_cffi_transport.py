@@ -154,20 +154,22 @@ class CurlCffiTransport(httpx.BaseTransport):
             session.close()
             raise
 
-        # [codex-diag] Log what the endpoint actually returned so we can tell a
-        # real Codex SSE stream (content-type text/event-stream) apart from a
-        # Cloudflare challenge (text/html + cf-mitigated) or an API error (json).
-        try:
-            _h = curl_resp.headers
-            logger.warning(
-                "[codex-diag] curl_cffi %s %s -> status=%s content-type=%s "
-                "cf-mitigated=%s cf-ray=%s server=%s impersonate=%s",
-                request.method, str(request.url), curl_resp.status_code,
-                _h.get("content-type"), _h.get("cf-mitigated"),
-                _h.get("cf-ray"), _h.get("server"), self._impersonate,
-            )
-        except Exception:
-            pass
+        # Debug-level visibility into what the endpoint returned — lets us tell a
+        # real Codex SSE stream apart from a Cloudflare challenge (text/html +
+        # cf-mitigated) or an API error (json) when diagnosing. Silent unless
+        # debug logging is enabled.
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                _h = curl_resp.headers
+                logger.debug(
+                    "curl_cffi codex %s %s -> status=%s content-type=%s "
+                    "cf-mitigated=%s cf-ray=%s server=%s impersonate=%s",
+                    request.method, str(request.url), curl_resp.status_code,
+                    _h.get("content-type"), _h.get("cf-mitigated"),
+                    _h.get("cf-ray"), _h.get("server"), self._impersonate,
+                )
+            except Exception:
+                pass
 
         resp_headers: List[Tuple[str, str]] = [
             (key, value)

@@ -6964,7 +6964,10 @@ class AIAgent:
                 else:
                     _synth = None
                 if _synth:
-                    logger.warning(
+                    # Normal path for the chatgpt.com Codex backend (it sends a
+                    # null-output terminal event every turn) — keep at debug so
+                    # it doesn't spam the logs once-per-turn.
+                    logger.debug(
                         "Codex responses.stream() accumulator failed (%s: %s); "
                         "reconstructed reply from %d items / %d text parts. %s",
                         type(exc).__name__, exc, len(collected_output_items),
