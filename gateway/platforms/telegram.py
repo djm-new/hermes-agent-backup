@@ -137,6 +137,49 @@ def _strip_mdv2(text: str) -> str:
     return cleaned
 
 
+# Characters Telegram does not count as renderable text when deciding whether
+# a message body is empty: zero-width marks, soft hyphen, and control codes
+# (the latter show up routinely in captured terminal output).
+_NON_RENDERING_CHARS = (
+    "\u200b\u200c\u200d\u2060\ufeff\u00ad\u180e"
+    "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x1b"
+)
+_NON_RENDERING_TRANS = {ord(c): None for c in _NON_RENDERING_CHARS}
+
+_MDV2_FENCE_RE = re.compile(r'```[^\n]*\n?')
+_MDV2_MARKER_RE = re.compile(r'[`*_~>]')
+_MDV2_ESCAPED_RE = re.compile(r'\\[_*\[\]()~`>#\+\-=|{}.!\\]')
+
+# Stands in for an escaped special character while markers are stripped, so a
+# literal "\." is not mistaken for markup.  Must survive str.strip() and not
+# appear in _NON_RENDERING_CHARS.
+_VISIBLE_SENTINEL = "\ufffc"
+
+
+def _renders_empty_mdv2(text: str) -> bool:
+    """Return True if *text* would render as zero visible characters.
+
+    Telegram rejects such a payload with ``BadRequest: text must be
+    non-empty``.  The usual trigger is a fenced code block wrapping empty
+    command output: markup-only content that looks non-empty to Python but
+    parses to nothing on Telegram's side.  Since the payload is identical on
+    every retry it fails permanently, so the reply is never delivered and the
+    user just sees a delivery-failure notice — indistinguishable from the
+    agent ignoring them.
+    """
+    if not text:
+        return True
+    # Escaped specials are real visible characters — protect them before the
+    # marker-stripping passes below can eat them.
+    s = _MDV2_ESCAPED_RE.sub(_VISIBLE_SENTINEL, text)
+    s = _MDV2_FENCE_RE.sub('', s)      # ``` fences (bodies are kept)
+    s = s.replace('```', '')
+    s = s.replace('||', '')            # spoiler markers
+    s = _MDV2_MARKER_RE.sub('', s)     # bold / italic / strike / code / quote
+    s = s.translate(_NON_RENDERING_TRANS)
+    return not s.strip()
+
+
 # ---------------------------------------------------------------------------
 # Markdown table → Telegram-friendly row groups
 # ---------------------------------------------------------------------------
@@ -276,6 +319,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
     # Telegram message limits
     MAX_MESSAGE_LENGTH = 4096
+    # Shown when a reply's entire body renders to nothing on Telegram (e.g. a
+    # code fence around empty command output).  Better an explicit "nothing
+    # came back" than a silently dropped turn.
+    EMPTY_RENDER_PLACEHOLDER = "(no output)"
     # Threshold for detecting Telegram client-side message splits.
     # When a chunk is near this limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 4000
@@ -1464,7 +1511,23 @@ class TelegramAdapter(BasePlatformAdapter):
                     re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
                     for chunk in chunks
                 ]
-            
+
+            # Telegram rejects a body that renders to zero visible characters
+            # with "text must be non-empty".  Retrying can't help — the payload
+            # is identical every time — so drop such chunks here, and if that
+            # leaves nothing, say so explicitly rather than losing the turn.
+            #
+            # Only reachable when len(chunks) == 1: multi-chunk sends carry a
+            # visible "(i/N)" suffix, so chunk numbering can never go stale.
+            renderable = [c for c in chunks if not _renders_empty_mdv2(c)]
+            if not renderable:
+                logger.info(
+                    "[%s] Response renders empty on Telegram; sending placeholder",
+                    self.name,
+                )
+                renderable = [_escape_mdv2(self.EMPTY_RENDER_PLACEHOLDER)]
+            chunks = renderable
+
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
             
@@ -1621,6 +1684,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name,
                 )
                 return SendResult(success=False, error="message_too_long")
+            # Empty-body rejections are deterministic: the same payload fails
+            # identically on every attempt.  Mark non-retryable so the caller
+            # goes straight to its plain-text fallback instead of sleeping
+            # through two pointless retries before giving up.
+            if "non-empty" in err_str or "message text is empty" in err_str:
+                return SendResult(success=False, error=str(e), retryable=False)
             # TimedOut means the request may have reached Telegram —
             # mark as non-retryable so _send_with_retry() doesn't re-send.
             _to = locals().get("_TimedOut")
@@ -1665,6 +1734,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=message_id)
 
             formatted = self.format_message(content)
+            # Same empty-render rejection guarded in send(): on the terminal
+            # edit this is what the user is left looking at, so substitute the
+            # placeholder rather than leaving the streamed message as-is.
+            if _renders_empty_mdv2(formatted):
+                formatted = _escape_mdv2(self.EMPTY_RENDER_PLACEHOLDER)
+                content = self.EMPTY_RENDER_PLACEHOLDER
             try:
                 await self._bot.edit_message_text(
                     chat_id=int(chat_id),
