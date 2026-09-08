@@ -35,6 +35,17 @@ RUN touch README.md && \
       --extra web
 
 COPY . .
+
+# Upstream ships a `.python-version` pinning 3.11, but the venv above was built
+# against the debian:13.4 system interpreter (3.13) because `uv sync` runs BEFORE
+# this COPY. That mismatch is a live landmine: any later project-level `uv`
+# command run with cwd /opt/hermes (sync/run/venv) reads 3.11, decides the 3.13
+# venv is wrong, and RECREATES .venv from scratch — deleting site-packages out
+# from under the running gateway. That took Chief down on 2026-09-08: certifi
+# vanished and every agent turn died in ssl_guard.verify_ca_bundle(). Pin the
+# file to the interpreter the venv actually uses so uv reuses it instead.
+RUN echo "3.13" > .python-version
+
 # Normalize shell scripts to LF. Uploads from a Windows/autocrlf checkout can
 # carry CRLF, which makes bash choke on the stray carriage return
 # ("$'\r': command not found", "syntax error near $'{\r'") and crash-loops the
