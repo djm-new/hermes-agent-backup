@@ -1,0 +1,56 @@
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
+FROM debian:13.4
+
+ENV PYTHONUNBUFFERED=1
+ENV HERMES_HOME=/opt/data
+ENV PATH="/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential curl python3 ripgrep ffmpeg gcc python3-dev \
+      libffi-dev procps git openssh-client tini ca-certificates bash && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+WORKDIR /opt/hermes
+
+# Install a gateway-focused dependency set. The full upstream Dockerfile builds
+# web/TUI assets and Playwright browsers, which makes Railway deployments very
+# large/slow. Chief's always-on cloud service only needs the gateway plus core
+# tools, Telegram/Slack messaging, cron, CLI helpers, MCP/ACP, and memory.
+#
+# The `cli` extra was REMOVED upstream (folded into the base install) — passing
+# it makes `uv sync --frozen` fail. Verified 2026-09-08 against Hermes v0.21.1:
+# this exact extras set resolves and produces a working gateway.
+COPY pyproject.toml uv.lock ./
+RUN touch README.md && \
+    uv sync --frozen --no-install-project \
+      --extra messaging \
+      --extra slack \
+      --extra pty \
+      --extra mcp \
+      --extra honcho \
+      --extra acp \
+      --extra web
+
+COPY . .
+# Normalize shell scripts to LF. Uploads from a Windows/autocrlf checkout can
+# carry CRLF, which makes bash choke on the stray carriage return
+# ("$'\r': command not found", "syntax error near $'{\r'") and crash-loops the
+# gateway start script. Strip trailing CR so the image's scripts are always LF.
+RUN sed -i 's/\r$//' docker/*.sh
+RUN uv pip install --no-cache-dir --no-deps -e "."
+
+# NOTE (2026-09-08): the curl_cffi Chrome-TLS shim for the ChatGPT Codex backend
+# was dropped in the v0.21.1 upgrade. It existed because a flagged Railway IP drew
+# Cloudflare bot-management challenges on chatgpt.com; its hook lived in
+# run_agent.py, which upstream has since restructured into agent/transports/ and
+# agent/codex_runtime.py. Plain TLS was verified reaching the Codex backend from
+# this container on 2026-09-08. If Cloudflare challenges return (HTML instead of
+# a stream, cf-mitigated), reintroduce impersonation in agent/transports/codex.py
+# rather than run_agent.py. Old shim: git show 4786fee47:agent/curl_cffi_transport.py
+
+RUN mkdir -p /opt/data && chmod -R a+rX /opt/hermes
+
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
